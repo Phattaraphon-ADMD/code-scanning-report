@@ -149,9 +149,54 @@ function repoSegmentFor(repo) {
   return repo || "{owner}/{repo}";
 }
 
+// Older "gh" versions lack "--slurp" and may print pages as back-to-back arrays: [..][..].
+function parsePaginatedArrays(text) {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const items = [];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let start = 0;
+
+  for (let index = 0; index < trimmed.length; index++) {
+    const char = trimmed[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+    } else if (char === "[" || char === "{") {
+      if (depth === 0) {
+        start = index;
+      }
+      depth++;
+    } else if (char === "]" || char === "}") {
+      depth--;
+      if (depth === 0) {
+        items.push(...[].concat(JSON.parse(trimmed.slice(start, index + 1))));
+      }
+    }
+  }
+
+  return items;
+}
+
 function ghApiPaginate(endpoint) {
   // Array args (no shell) avoid command injection even though --repo is already validated above.
-  const result = spawnSync("gh", ["api", "--paginate", "--slurp", endpoint], {
+  const result = spawnSync("gh", ["api", "--paginate", endpoint], {
     encoding: "utf8",
     maxBuffer: 1024 * 1024 * 64,
   });
@@ -166,8 +211,7 @@ function ghApiPaginate(endpoint) {
     );
   }
 
-  // "--slurp" wraps each page's array into an outer array; flatten back to one list.
-  return JSON.parse(result.stdout || "[]").flat();
+  return parsePaginatedArrays(result.stdout);
 }
 
 function fetchAlertsFromGitHub(repo, state, type, extraQuery = "") {

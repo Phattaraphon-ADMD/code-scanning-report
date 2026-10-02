@@ -103,3 +103,27 @@ test("existing GitHub code-scanning local input still works", () => {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+// A fake "gh" shell script cannot be spawned without a shell on Windows.
+test("works with an older gh that has no --slurp and prints pages back-to-back", { skip: process.platform === "win32" }, () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fake-gh-"));
+  try {
+    const fakeGh = path.join(directory, "gh");
+    const pages = '[{"number":1,"secret_type":"a"}][{"number":2,"secret_type":"b"}]';
+    fs.writeFileSync(
+      fakeGh,
+      `#!/bin/sh\nfor arg in "$@"; do [ "$arg" = "--slurp" ] && { echo "unknown flag: --slurp" >&2; exit 1; }; done\necho '${pages}'\n`,
+      { mode: 0o755 },
+    );
+
+    const run = spawnSync(process.execPath, [cli, "--type", "secret-scanning", "--repo", "o/r", "--stdout"], {
+      cwd: directory,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${directory}${path.delimiter}${process.env.PATH}` },
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.deepEqual(JSON.parse(run.stdout).alerts.map((alert) => alert.alert), [1, 2]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
