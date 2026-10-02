@@ -1,6 +1,6 @@
 {
     "name": "code-scanning-report",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "Fetch GitHub code-scanning alerts for a repository (via the GitHub CLI) and normalize them into a package-upgrade report.",
     "bin": {
         "code-scanning-report": "./bin/cli.js"
