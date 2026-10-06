@@ -1,7 +1,7 @@
 {
     "name": "code-scanning-report",
-    "version": "1.0.1",
-    "description": "Fetch GitHub code-scanning alerts for a repository (via the GitHub CLI) and normalize them into a package-upgrade report.",
+    "version": "1.1.0",
+    "description": "Fetch GitHub code-scanning, Dependabot and secret-scanning alerts for a repository (via the GitHub CLI) and normalize them into a remediation report.",
     "bin": {
         "code-scanning-report": "./bin/cli.js"
     },
