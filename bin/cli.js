@@ -5,7 +5,7 @@ const { spawnSync } = require("child_process");
 
 const DEFAULT_OUTPUT = "security-alerts.json";
 const DEFAULT_CHECKMARX_OUTPUT = "security-checkmarx-alerts.json";
-const VALID_TYPES = ["code-scanning", "secret-scanning", "checkmarx", "all"];
+const VALID_TYPES = ["code-scanning", "secret-scanning", "dependabot", "checkmarx", "all"];
 const DEFAULT_TYPE = "code-scanning";
 // Generic and AI-detected patterns are only returned by the API when requested by name.
 const GENERIC_SECRET_TYPES = [
@@ -24,24 +24,32 @@ const GENERIC_SECRET_TYPES = [
 const STATES_BY_TYPE = {
   "code-scanning": ["open", "closed", "dismissed", "fixed", "all"],
   "secret-scanning": ["open", "resolved", "all"],
+  dependabot: ["open", "dismissed", "fixed", "auto_dismissed", "all"],
 };
+// "all" skips dependabot because the code-scanning report already includes it.
+const ALL_TYPES = ["code-scanning", "secret-scanning"];
 // Only allow simple "owner/repo" values; this is passed to "gh api" as a URL segment.
 const REPO_PATTERN = /^[\w.-]+\/[\w.-]+$/;
 
 const HELP_TEXT = `Usage: code-scanning-report [options]
 
-Fetch GitHub code-scanning and/or secret-scanning alerts (via the GitHub
-CLI), or compact a local Checkmarx SCA report for remediation.
+Fetch GitHub code-scanning, secret-scanning and/or Dependabot alerts (via the
+GitHub CLI), or compact a local Checkmarx SCA report for remediation.
+The code-scanning report also includes the repository's Dependabot alerts
+("dependabot") and malware alerts ("malware") when fetched from GitHub.
 
 Options:
   -t, --type <type>        Alert type: code-scanning, secret-scanning,
-                           checkmarx, all (GitHub types only)
+                           dependabot, checkmarx, all (code-scanning and
+                           secret-scanning)
                            (default: ${DEFAULT_TYPE})
   -r, --repo <owner/repo>  Target GitHub repository (default: detected by "gh"
                            from the git remote of the current directory)
   -s, --state <state>      GitHub alert state to fetch (default: open)
                            code-scanning:   open, closed, dismissed, fixed, all
                            secret-scanning: open, resolved, all
+                           dependabot:      open, dismissed, fixed,
+                                            auto_dismissed, all
   -i, --input <path>       Read a local JSON file instead of calling the
                            GitHub API (required for checkmarx)
   -o, --output <path>      Output file path (default: ${DEFAULT_OUTPUT},
@@ -118,7 +126,7 @@ function parseArgs(argv) {
   }
 
   if (args.input && args.type === "all") {
-    console.error('--input requires --type "code-scanning" or "secret-scanning".');
+    console.error('--input requires --type "code-scanning", "secret-scanning" or "dependabot".');
     process.exit(1);
   }
 
@@ -141,7 +149,7 @@ function parseArgs(argv) {
 }
 
 function selectedTypes(type) {
-  return type === "all" ? Object.keys(STATES_BY_TYPE) : [type];
+  return type === "all" ? ALL_TYPES : [type];
 }
 
 function repoSegmentFor(repo) {
@@ -214,13 +222,24 @@ function ghApiPaginate(endpoint) {
   return parsePaginatedArrays(result.stdout);
 }
 
-function fetchAlertsFromGitHub(repo, state, type, extraQuery = "") {
-  const stateQuery = state === "all" ? "" : `&state=${encodeURIComponent(state)}`;
+// Dependabot has no "closed" state; map it to every non-open state. Null means no filter.
+function dependabotStates(state) {
+  if (state === "all") return null;
+  return state === "closed" ? ["fixed", "dismissed", "auto_dismissed"] : [state];
+}
+
+function fetchAlertsFromGitHub(repo, state, type, extraQuery = "", fatal = true) {
+  const apiState = type === "dependabot" ? dependabotStates(state)?.join(",") : state === "all" ? null : state;
+  const stateQuery = apiState ? `&state=${encodeURIComponent(apiState)}` : "";
   const endpoint = `repos/${repoSegmentFor(repo)}/${type}/alerts?per_page=100${stateQuery}${extraQuery}`;
 
   try {
     return ghApiPaginate(endpoint);
   } catch (error) {
+    if (!fatal) {
+      console.error(`Skipping ${type} alerts: ${error.message.split("\n").slice(0, 2).join(" ")}`);
+      return null;
+    }
     console.error(error.message);
     process.exit(1);
   }
@@ -819,9 +838,138 @@ function buildCodeScanningReport(alerts, state) {
   return { report: output, summaryLines };
 }
 
+const MALWARE_REMEDIATION = [
+  "Remove the malicious package and every lockfile entry for it; do not upgrade it.",
+  "Replace it with a trusted alternative, or pin a known-good version, if the functionality is still needed.",
+  "Treat any machine or CI job that installed it as compromised and rotate credentials it could access.",
+];
+
+function buildDependabotReport(alerts, state) {
+  const states = dependabotStates(state);
+  const groups = { general: new Map(), malware: new Map() };
+  const skipped = [];
+
+  for (const alert of alerts) {
+    if (states && alert.state && !states.includes(alert.state)) {
+      continue;
+    }
+
+    const vulnerability = alert.security_vulnerability || {};
+    const advisory = alert.security_advisory || {};
+    const pkg = vulnerability.package || alert.dependency?.package || {};
+
+    if (!pkg.name) {
+      skipped.push({
+        alert: alert.number,
+        reason: "Unable to determine package name from alert",
+      });
+      continue;
+    }
+
+    const map = advisory.classification === "malware" ? groups.malware : groups.general;
+    const key = `${pkg.ecosystem || ""}:${pkg.name}`;
+    if (!map.has(key)) {
+      map.set(key, {
+        package: pkg.name,
+        ecosystem: pkg.ecosystem || null,
+        severity: null,
+        manifests: new Set(),
+        fixedVersions: new Set(),
+        advisories: [],
+      });
+    }
+
+    const group = map.get(key);
+    const severity = String(vulnerability.severity || advisory.severity || "unknown").toUpperCase();
+    const fixedIn = vulnerability.first_patched_version?.identifier || null;
+
+    group.severity = highestSeverity(group.severity, severity);
+    if (alert.dependency?.manifest_path) group.manifests.add(alert.dependency.manifest_path);
+    if (fixedIn) group.fixedVersions.add(fixedIn);
+
+    group.advisories.push({
+      id: advisory.cve_id || advisory.ghsa_id || null,
+      ghsa: advisory.ghsa_id || null,
+      alert: alert.number,
+      severity,
+      summary: normalizeSummary(advisory.summary),
+      vulnerableVersionRange: vulnerability.vulnerable_version_range || null,
+      fixedIn,
+      url: alert.html_url || null,
+    });
+  }
+
+  const normalizeGroups = (map, isMalware) =>
+    [...map.values()]
+      .map((group) => ({
+        package: group.package,
+        ecosystem: group.ecosystem,
+        manifests: [...group.manifests].sort(),
+        // The highest first-patched version covers every advisory listed for the package.
+        ...(isMalware
+          ? { remediation: MALWARE_REMEDIATION }
+          : { target: [...group.fixedVersions].sort(compareVersions).at(-1) || null }),
+        severity: group.severity || "UNKNOWN",
+        advisories: group.advisories.sort(
+          (a, b) => severityRank(b.severity) - severityRank(a.severity) || (a.alert || 0) - (b.alert || 0)
+        ),
+      }))
+      .sort(
+        (a, b) => severityRank(b.severity) - severityRank(a.severity) || a.package.localeCompare(b.package)
+      );
+
+  const normalizedAlerts = normalizeGroups(groups.general, false);
+  const malware = normalizeGroups(groups.malware, true);
+
+  const report = {
+    scope: "fix-listed-alerts-only",
+    source: "github-dependabot",
+    alerts: normalizedAlerts,
+    malware,
+  };
+
+  if (skipped.length > 0) {
+    report.skipped = skipped;
+  }
+
+  const summaryLines = [
+    `Input alerts:      ${alerts.length}`,
+    `Package groups:    ${normalizedAlerts.length}`,
+    `Malware packages:  ${malware.length}`,
+    `Skipped alerts:    ${skipped.length}`,
+  ];
+
+  for (const item of normalizedAlerts) {
+    summaryLines.push(
+      `- ${item.package} (${item.ecosystem || "?"}): -> ${item.target || "?"} (${item.advisories.length} alert(s), ${item.severity})`
+    );
+  }
+
+  for (const item of malware) {
+    summaryLines.push(`- MALWARE ${item.package} (${item.ecosystem || "?"}): remove (${item.advisories.length} alert(s))`);
+  }
+
+  return { report, summaryLines };
+}
+
+// Adds the repository's Dependabot and malware alerts to a code-scanning result; failures are non-fatal.
+function attachDependabot(result, args) {
+  const alerts = fetchAlertsFromGitHub(args.repo, args.state, "dependabot", "", false);
+  if (!alerts) return;
+
+  const dependabot = buildDependabotReport(alerts, args.state);
+  result.report.dependabot = dependabot.report.alerts;
+  result.report.malware = dependabot.report.malware;
+  if (dependabot.report.skipped) {
+    result.report.dependabotSkipped = dependabot.report.skipped;
+  }
+  result.summaryLines.push("[dependabot]", ...dependabot.summaryLines);
+}
+
 const REPORT_BUILDERS = {
   "code-scanning": buildCodeScanningReport,
   "secret-scanning": buildSecretScanningReport,
+  dependabot: buildDependabotReport,
 };
 
 // "security-alerts.json" + "secret-scanning" -> "security-alerts.secret-scanning.json"
@@ -859,6 +1007,9 @@ function main(args) {
         : fetchAlertsFromGitHub(args.repo, args.state, type);
 
     results[type] = REPORT_BUILDERS[type](alerts, args.state);
+    if (type === "code-scanning" && !args.input) {
+      attachDependabot(results[type], args);
+    }
   }
 
   const toJson = (report) => JSON.stringify(report, null, 2) + "\n";

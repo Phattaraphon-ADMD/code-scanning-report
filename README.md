@@ -1,6 +1,6 @@
 # code-scanning-report
 
-Fetch GitHub code-scanning and secret-scanning alerts (via the GitHub CLI), or compact a local Checkmarx SCA report, into a normalized JSON report.
+Fetch GitHub code-scanning, secret-scanning and Dependabot alerts (via the GitHub CLI), or compact a local Checkmarx SCA report, into a normalized JSON report.
 
 ## Prerequisites
 
@@ -38,5 +38,11 @@ A post-install check prints a warning if `gh` is not found on PATH. It never fai
 ```sh
 code-scanning-report --help
 code-scanning-report --repo owner/repo --type code-scanning
+```
+
+The code-scanning report also includes `dependabot` (Dependabot alerts) and `malware` (Dependabot malware alerts) sections when fetched from GitHub; a failed Dependabot fetch only prints a warning. Use `--type dependabot` for those alone.
+
+```sh
+code-scanning-report --repo owner/repo --type dependabot
 code-scanning-report --type checkmarx --input report.json
 ```

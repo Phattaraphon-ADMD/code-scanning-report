@@ -105,6 +105,75 @@ test("existing GitHub code-scanning local input still works", () => {
 });
 
 // A fake "gh" shell script cannot be spawned without a shell on Windows.
+test("normalizes Dependabot alerts from a local file", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dependabot-cli-"));
+  try {
+    const alert = (number, severity, patched, range) => ({
+      number,
+      state: "open",
+      html_url: `https://example.com/${number}`,
+      dependency: { manifest_path: "package-lock.json" },
+      security_advisory: { ghsa_id: `GHSA-${number}`, cve_id: `CVE-${number}`, summary: "Bad  bug" },
+      security_vulnerability: {
+        package: { ecosystem: "npm", name: "lodash" },
+        severity,
+        vulnerable_version_range: range,
+        first_patched_version: { identifier: patched },
+      },
+    });
+    fs.writeFileSync(
+      path.join(directory, "alerts.json"),
+      JSON.stringify([alert(1, "medium", "4.17.5", "< 4.17.5"), alert(2, "high", "4.17.21", "< 4.17.21"),
+        { ...alert(3, "low", "1.0.0", "< 1.0.0"), state: "fixed" }]),
+    );
+    const run = runCli(directory, "--type", "dependabot", "--input", "alerts.json", "--stdout");
+    assert.equal(run.status, 0, run.stderr);
+    const report = JSON.parse(run.stdout);
+    assert.equal(report.source, "github-dependabot");
+    assert.equal(report.alerts.length, 1);
+    assert.equal(report.alerts[0].package, "lodash");
+    assert.equal(report.alerts[0].target, "4.17.21");
+    assert.equal(report.alerts[0].severity, "HIGH");
+    assert.deepEqual(report.alerts[0].advisories.map((item) => item.alert), [2, 1]);
+    assert.equal(report.alerts[0].advisories[1].summary, "Bad bug");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("separates Dependabot malware alerts and maps closed to non-open states", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dependabot-cli-"));
+  try {
+    const alert = (number, name, classification, state = "open") => ({
+      number,
+      state,
+      dependency: { manifest_path: "package-lock.json" },
+      security_advisory: { ghsa_id: `GHSA-${number}`, cve_id: null, summary: "s", classification },
+      security_vulnerability: {
+        package: { ecosystem: "npm", name },
+        severity: "critical",
+        vulnerable_version_range: ">= 0",
+        first_patched_version: null,
+      },
+    });
+    fs.writeFileSync(
+      path.join(directory, "alerts.json"),
+      JSON.stringify([alert(1, "evil", "malware"), alert(2, "lodash", "general"), alert(3, "old", "general", "fixed")]),
+    );
+    const open = JSON.parse(runCli(directory, "--type", "dependabot", "--input", "alerts.json", "--stdout").stdout);
+    assert.deepEqual(open.malware.map((item) => item.package), ["evil"]);
+    assert.equal(open.malware[0].target, undefined);
+    assert.ok(open.malware[0].remediation.length > 0);
+    assert.deepEqual(open.alerts.map((item) => item.package), ["lodash"]);
+
+    const closed = runCli(directory, "--type", "dependabot", "--state", "all", "--input", "alerts.json", "--stdout");
+    assert.deepEqual(JSON.parse(closed.stdout).alerts.map((item) => item.package), ["lodash", "old"]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// A fake "gh" shell script cannot be spawned without a shell on Windows.
 test("works with an older gh that has no --slurp and prints pages back-to-back", { skip: process.platform === "win32" }, () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fake-gh-"));
   try {
