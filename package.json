@@ -3,7 +3,7 @@
     "version": "1.1.0",
     "description": "Fetch GitHub code-scanning, Dependabot and secret-scanning alerts for a repository (via the GitHub CLI) and normalize them into a remediation report.",
     "bin": {
-        "code-scanning-report": "./bin/cli.js"
+        "code-scanning-report": "bin/cli.js"
     },
     "files": [
         "bin",
