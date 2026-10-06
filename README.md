@@ -37,6 +37,7 @@ A post-install check prints a warning if `gh` is not found on PATH. It never fai
 
 ```sh
 code-scanning-report --help
+code-scanning-report --version
 code-scanning-report --repo owner/repo --type code-scanning
 ```
 

@@ -92,6 +92,15 @@ test("rejects invalid SCA input and protects the original report", () => {
   }
 });
 
+test("prints the package version", () => {
+  const expected = require("../package.json").version;
+  for (const flag of ["-v", "--version"]) {
+    const run = runCli(process.cwd(), flag);
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.stdout.trim(), expected);
+  }
+});
+
 test("existing GitHub code-scanning local input still works", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "checkmarx-cli-"));
   try {

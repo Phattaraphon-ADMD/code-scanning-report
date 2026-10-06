@@ -59,6 +59,7 @@ Options:
       --stdout             Print the normalized report to stdout instead
                            of writing a file
   -h, --help               Show this help message
+  -v, --version            Show the installed version
 
 Requires the GitHub CLI ("gh") to be installed and authenticated
 (run "gh auth login") when --input is not used.
@@ -84,6 +85,10 @@ function parseArgs(argv) {
       case "--help":
         args.help = true;
         break;
+      case "-v":
+      case "--version":
+        console.log(require("../package.json").version);
+        process.exit(0);
       case "-t":
       case "--type":
         args.type = argv[++i];
